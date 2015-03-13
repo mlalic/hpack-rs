@@ -28,6 +28,22 @@
 //!          b'u', b'e'],
 //!     result);
 //! ```
+//!
+//! Encodes some pseudo-headers that are already found in the static table.
+//!
+//! ```rust
+//! use hpack::Encoder;
+//!
+//! let mut encoder = Encoder::new();
+//! let headers = vec![
+//!     (b":method".to_vec(), b"GET".to_vec()),
+//!     (b":path".to_vec(), b"/".to_vec()),
+//! ];
+//!
+//! // The headers are encoded by providing their index (with a bit flag
+//! // indicating that the indexed representation is used).
+//! assert_eq!(encoder.encode(&headers), vec![2 | 0x80, 4 | 0x80]);
+//! ```
 use super::STATIC_TABLE;
 use super::HeaderTable;
 

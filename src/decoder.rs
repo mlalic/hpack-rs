@@ -13,9 +13,12 @@
 //! use hpack::Decoder;
 //! let mut decoder = Decoder::new();
 //!
-//! let header_list = decoder.decode(&[0x82]).ok().unwrap();
+//! let header_list = decoder.decode(&[0x82, 0x84]).unwrap();
 //!
-//! assert_eq!([(b":method".to_vec(), b"GET".to_vec())], header_list);
+//! assert_eq!(header_list, [
+//!     (b":method".to_vec(), b"GET".to_vec()),
+//!     (b":path".to_vec(), b"/".to_vec()),
+//! ]);
 //! ```
 
 use super::huffman::HuffmanDecoder;
