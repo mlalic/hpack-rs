@@ -4,6 +4,17 @@ name = "hpack"
 version = "0.0.1"
 authors = ["Marko Lalic <marko.lalic@gmail.com>"]
 
+exclude = [
+    "fixtures/*",
+]
+
+description = "A library implementing HPACK coding"
+repository = "https://github.com/mlalic/hpack-rs"
+homepage = "https://github.com/mlalic/hpack-rs"
+readme = "README.md"
+license = "MIT"
+keywords = ["hpack", "http2", "encoding", "decoding"]
+
 [features]
 
 # A feature defining some interop tests between the HPACK decoder and
