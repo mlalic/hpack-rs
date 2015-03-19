@@ -3,6 +3,8 @@
 
 An [HPACK](http://http2.github.io/http2-spec/compression.html) coder implementation in Rust.
 
+[API Documentation](https://mlalic.github.io/hpack-rs/)
+
 # Overview
 
 The library lets you perform header compression and decompression according to the HPACK spec.
