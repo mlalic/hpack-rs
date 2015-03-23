@@ -565,7 +565,7 @@ mod tests {
 
         let iter_res: Vec<(&[u8], &[u8])> = table.iter().collect();
 
-        let expected = vec![
+        let expected: Vec<(&[u8], &[u8])> = vec![
             (b"c", b"d"),
             (b"123", b"456"),
             (b"a", b"b"),
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn test_header_table_iter() {
         let mut table = HeaderTable::with_static_table(STATIC_TABLE);
-        let headers = [
+        let headers: [(&[u8], &[u8]); 2] = [
             (b"a", b"b"),
             (b"c", b"d"),
         ];
@@ -678,7 +678,7 @@ mod tests {
     fn test_find_header_static_partial() {
         {
             let table = HeaderTable::with_static_table(STATIC_TABLE);
-            let h = (b":method", b"PUT");
+            let h: (&[u8], &[u8]) = (b":method", b"PUT");
 
             if let (index, false) = table.find_header(h).unwrap() {
                 assert_eq!(h.0, STATIC_TABLE[index - 1].0);
@@ -690,7 +690,7 @@ mod tests {
         }
         {
             let table = HeaderTable::with_static_table(STATIC_TABLE);
-            let h = (b":status", b"333");
+            let h: (&[u8], &[u8]) = (b":status", b"333");
 
             if let (index, false) = table.find_header(h).unwrap() {
                 assert_eq!(h.0, STATIC_TABLE[index - 1].0);
@@ -702,7 +702,7 @@ mod tests {
         }
         {
             let table = HeaderTable::with_static_table(STATIC_TABLE);
-            let h = (b":authority", b"example.com");
+            let h: (&[u8], &[u8]) = (b":authority", b"example.com");
 
             if let (index, false) = table.find_header(h).unwrap() {
                 assert_eq!(h.0, STATIC_TABLE[index - 1].0);
@@ -712,7 +712,7 @@ mod tests {
         }
         {
             let table = HeaderTable::with_static_table(STATIC_TABLE);
-            let h = (b"www-authenticate", b"asdf");
+            let h: (&[u8], &[u8]) = (b"www-authenticate", b"asdf");
 
             if let (index, false) = table.find_header(h).unwrap() {
                 assert_eq!(h.0, STATIC_TABLE[index - 1].0);
@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn test_find_header_dynamic_full() {
         let mut table = HeaderTable::with_static_table(STATIC_TABLE);
-        let h = (b":method", b"PUT");
+        let h: (&[u8], &[u8]) = (b":method", b"PUT");
         table.add_header(h.0.to_vec(), h.1.to_vec());
 
         if let (index, true) = table.find_header(h).unwrap() {
@@ -749,7 +749,7 @@ mod tests {
             table.add_header(h.0.to_vec(), h.1.to_vec());
         }
         // Prepare a search
-        let h = (b"X-Custom-Header", b"different-stuff");
+        let h: (&[u8], &[u8]) = (b"X-Custom-Header", b"different-stuff");
 
         // It must match only partially
         if let (index, false) = table.find_header(h).unwrap() {
