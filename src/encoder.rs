@@ -54,7 +54,11 @@ use super::HeaderTable;
 /// Only `prefix_size` lowest-order bits of the first byte in the
 /// array are guaranteed to be used.
 pub fn encode_integer(mut value: usize, prefix_size: u8) -> Vec<u8> {
-    let Wrapping(mask) = Wrapping(1u8 << prefix_size) - Wrapping(1);
+    let Wrapping(mask) = if prefix_size >= 8 {
+        Wrapping(0xFF)
+    } else {
+        Wrapping(1u8 << prefix_size) - Wrapping(1)
+    };
     let mask = mask as usize;
     if value < mask {
         // Right now, the caller would need to be the one to combine

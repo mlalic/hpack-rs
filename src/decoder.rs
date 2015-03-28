@@ -47,7 +47,12 @@ fn decode_integer(buf: &[u8], prefix_size: u8)
                 IntegerDecodingError::NotEnoughOctets));
     }
 
-    let Wrapping(mask) = Wrapping(1u8 << prefix_size) - Wrapping(1);
+    // Make sure there's no overflow in the shift operation
+    let Wrapping(mask) = if prefix_size == 8 {
+        Wrapping(0xFF)
+    } else {
+        Wrapping(1u8 << prefix_size) - Wrapping(1)
+    };
     let mut value = (buf[0] & mask) as usize;
     if value < (mask as usize) {
         // Value fits in the prefix bits.
