@@ -14,6 +14,7 @@ homepage = "https://github.com/mlalic/hpack-rs"
 readme = "README.md"
 license = "MIT"
 keywords = ["hpack", "http2", "encoding", "decoding"]
+documentation = "https://mlalic.github.io/hpack-rs/hpack/index.html"
 
 [features]
 
