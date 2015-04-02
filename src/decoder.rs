@@ -21,6 +21,8 @@
 //! ]);
 //! ```
 
+use std::num::Wrapping;
+
 use super::huffman::HuffmanDecoder;
 use super::huffman::HuffmanDecoderError;
 

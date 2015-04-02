@@ -44,6 +44,8 @@
 //! // indicating that the indexed representation is used).
 //! assert_eq!(encoder.encode(&headers), vec![2 | 0x80, 4 | 0x80]);
 //! ```
+use std::num::Wrapping;
+
 use super::STATIC_TABLE;
 use super::HeaderTable;
 
