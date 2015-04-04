@@ -604,7 +604,7 @@ mod tests {
 
         let header_list = decoder.decode(&[0x82]).ok().unwrap();
 
-        assert_eq!([(b":method".to_vec(), b"GET".to_vec())], header_list);
+        assert_eq!(vec![(b":method".to_vec(), b"GET".to_vec())], header_list);
     }
 
     #[test]

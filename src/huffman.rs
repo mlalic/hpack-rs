@@ -656,7 +656,7 @@ mod tests {
 
         let result = decoder.decode(&hex_buffer);
 
-        assert_eq!(b"o", result.ok().unwrap());
+        assert_eq!(b"o".to_vec(), result.ok().unwrap());
     }
 
     /// Tests that when there are more than 7 padding bits, we get an error.
