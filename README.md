@@ -1,5 +1,7 @@
 # hpack-rs
-[![Build Status](https://travis-ci.org/mlalic/hpack-rs.svg?branch=master)](https://travis-ci.org/mlalic/hpack-rs)
+
+[![Build Status](https://img.shields.io/travis/mlalic/hpack-rs.svg?style=flat-square)](https://travis-ci.org/mlalic/hpack-rs)
+[![Crates.io](https://img.shields.io/crates/v/hpack.svg?style=flat-square)](https://crates.io/crates/hpack)
 
 An [HPACK](http://http2.github.io/http2-spec/compression.html) coder implementation in Rust.
 
