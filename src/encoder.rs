@@ -14,10 +14,10 @@
 //! let mut encoder = Encoder::new();
 //!
 //! let headers = vec![
-//!     (b"custom-key".to_vec(), b"custom-value".to_vec()),
+//!     (&b"custom-key"[..], &b"custom-value"[..]),
 //! ];
 //! // First encoding...
-//! let result = encoder.encode(&headers);
+//! let result = encoder.encode(headers);
 //! // The result is a literal encoding of the header name and value, with an
 //! // initial byte representing the type of the encoding
 //! // (incremental indexing).
@@ -36,13 +36,13 @@
 //!
 //! let mut encoder = Encoder::new();
 //! let headers = vec![
-//!     (b":method".to_vec(), b"GET".to_vec()),
-//!     (b":path".to_vec(), b"/".to_vec()),
+//!     (&b":method"[..], &b"GET"[..]),
+//!     (&b":path"[..], &b"/"[..]),
 //! ];
 //!
 //! // The headers are encoded by providing their index (with a bit flag
 //! // indicating that the indexed representation is used).
-//! assert_eq!(encoder.encode(&headers), vec![2 | 0x80, 4 | 0x80]);
+//! assert_eq!(encoder.encode(headers), vec![2 | 0x80, 4 | 0x80]);
 //! ```
 use std::num::Wrapping;
 
@@ -101,7 +101,7 @@ pub fn encode_integer(mut value: usize, prefix_size: u8) -> Vec<u8> {
 ///     (b"custom-key".to_vec(), b"custom-value".to_vec()),
 /// ];
 /// // First encoding...
-/// let result = encoder.encode(&headers);
+/// let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 /// // The result is a literal encoding of the header name and value, with an
 /// // initial byte representing the type of the encoding
 /// // (incremental indexing).
@@ -113,7 +113,7 @@ pub fn encode_integer(mut value: usize, prefix_size: u8) -> Vec<u8> {
 ///     result);
 ///
 /// // Encode the same headers again!
-/// let result = encoder.encode(&headers);
+/// let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 /// // The result is simply the index of the header in the header table (62),
 /// // with a flag representing that the decoder should use the index.
 /// assert_eq!(vec![0x80 | 62], result);
@@ -133,8 +133,7 @@ impl<'a> Encoder<'a> {
     }
 
     /// Encodes the given headers using the HPACK rules and returns a newly
-    /// allocated `Vec` containing the bytes representing the encoded header
-    /// set.
+    /// allocated `Vec` containing the bytes representing the encoded header /// set.
     ///
     /// The encoder so far supports only a single, extremely simple encoding
     /// strategy, whereby each header is represented as an indexed header if
@@ -143,22 +142,22 @@ impl<'a> Encoder<'a> {
     /// found either (i.e. there are never two header names with different
     /// values in the produced header table). Strings are always encoded as
     /// literals (Huffman encoding is not used).
-    pub fn encode(&mut self, headers: &Vec<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
+    pub fn encode<'b, I : IntoIterator<Item=(&'b [u8], &'b [u8])>>(&mut self, headers: I) -> Vec<u8> {
         let mut encoded: Vec<u8> = Vec::new();
 
-        for header in headers.iter() {
+        for header in headers {
             match self.header_table.find_header((&header.0, &header.1)) {
                 None => {
                     // The name of the header is in no tables: need to encode
                     // it with both a literal name and value.
-                    self.encode_literal(header, true, &mut encoded);
-                    self.header_table.add_header(header.0.clone(), header.1.clone());
+                    self.encode_literal(&header, true, &mut encoded);
+                    self.header_table.add_header(header.0.to_vec(), header.1.to_vec());
                 },
                 Some((index, false)) => {
                     // The name of the header is at the given index, but the
                     // value does not match the current one: need to encode
                     // only the value as a literal.
-                    self.encode_indexed_name((index, &header.1), false, &mut encoded);
+                    self.encode_indexed_name((index, header.1), false, &mut encoded);
                 },
                 Some((index, true)) => {
                     // The full header was found in one of the tables, so we
@@ -183,7 +182,7 @@ impl<'a> Encoder<'a> {
     /// - `buf` - The buffer into which the result is placed
     ///
     fn encode_literal(&mut self,
-                      header: &(Vec<u8>, Vec<u8>),
+                      header: &(&[u8], &[u8]),
                       should_index: bool,
                       buf: &mut Vec<u8>) {
         let mask = if should_index {
@@ -210,7 +209,7 @@ impl<'a> Encoder<'a> {
 
     /// Encodes a header whose name is indexed and places the result in the
     /// given buffer `buf`.
-    fn encode_indexed_name(&mut self, header: (usize, &Vec<u8>), should_index: bool, buf: &mut Vec<u8>) {
+    fn encode_indexed_name(&mut self, header: (usize, &[u8]), should_index: bool, buf: &mut Vec<u8>) {
         let (mask, prefix) = if should_index {
             (0x40, 6)
         } else {
@@ -281,7 +280,7 @@ mod tests {
             (b":method".to_vec(), b"GET".to_vec()),
         ];
 
-        let result = encoder.encode(&headers);
+        let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
         debug!("{:?}", result);
         assert!(is_decodable(&result, &headers));
@@ -296,7 +295,7 @@ mod tests {
             (b"custom-key".to_vec(), b"custom-value".to_vec()),
         ];
 
-        let result = encoder.encode(&headers);
+        let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
         assert!(is_decodable(&result, &headers));
         // The header is in the encoder's dynamic table.
         assert_eq!(encoder.header_table.dynamic_table.to_vec(), headers);
@@ -315,10 +314,10 @@ mod tests {
             (b"custom-key".to_vec(), b"custom-value".to_vec()),
         ];
         // First encoding...
-        let _ = encoder.encode(&headers);
+        let _ = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
         // Encode the same headers again!
-        let result = encoder.encode(&headers);
+        let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
         // The header is in the encoder's dynamic table.
         assert_eq!(encoder.header_table.dynamic_table.to_vec(), headers);
@@ -345,10 +344,10 @@ mod tests {
             let mut encoder: Encoder = Encoder::new();
             // `:method` is in the static table, but only for GET and POST
             let headers = vec![
-                (b":method".to_vec(), b"PUT".to_vec()),
+                (b":method", b"PUT"),
             ];
 
-            let result = encoder.encode(&headers);
+            let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
             // The first byte represents the index in the header table: last
             // occurrence of `:method` is at index 3.
@@ -363,7 +362,7 @@ mod tests {
                 (b":authority".to_vec(), b"example.com".to_vec()),
             ];
 
-            let result = encoder.encode(&headers);
+            let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
             assert_eq!(result[0], 1);
             // The rest of it correctly represents PUT?
@@ -384,7 +383,7 @@ mod tests {
             (b":path".to_vec(), b"/some/path".to_vec()),
         ];
 
-        let result = encoder.encode(&headers);
+        let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
         assert!(is_decodable(&result, &headers));
     }
