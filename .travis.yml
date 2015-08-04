@@ -1,13 +1,21 @@
 language: rust
+matrix:
+  include:
+    - rust: nightly
+    - rust: beta
+    - rust: stable
 script: cargo test --features "interop_tests"
+
+sudo: false
 
 after_success: |
   [ $TRAVIS_BRANCH = master ] &&
   [ $TRAVIS_PULL_REQUEST = false ] &&
-  cargo doc &&
+  [ $TRAVIS_RUST_VERSION = stable ] &&
+  cargo doc --no-deps &&
   echo "<meta http-equiv=refresh content=0;url=hpack/index.html>" > target/doc/index.html &&
-  sudo pip install ghp-import &&
-  ghp-import -n target/doc &&
+  pip install --user ghp-import &&
+  /home/travis/.local/bin/ghp-import -n target/doc &&
   git push -fq https://${GH_TOKEN}@github.com/${TRAVIS_REPO_SLUG}.git gh-pages
 
 env:
