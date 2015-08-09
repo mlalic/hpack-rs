@@ -2,6 +2,7 @@
 
 [![Travis Build Status](https://img.shields.io/travis/mlalic/hpack-rs.svg?style=flat-square&label=Travis%20Build)](https://travis-ci.org/mlalic/hpack-rs)
 [![AppVeyor Build Status](https://img.shields.io/appveyor/ci/mlalic/hpack-rs/master.svg?style=flat-square&label=AppVeyor%20Build)](https://ci.appveyor.com/project/mlalic/hpack-rs)
+[![Coveralls master](https://img.shields.io/coveralls/mlalic/hpack-rs/master.svg?style=flat-square)](https://coveralls.io/github/mlalic/hpack-rs)
 [![Crates.io](https://img.shields.io/crates/v/hpack.svg?style=flat-square)](https://crates.io/crates/hpack)
 
 An [HPACK](http://http2.github.io/http2-spec/compression.html) coder implementation in Rust.
