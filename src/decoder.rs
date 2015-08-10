@@ -22,6 +22,7 @@
 //! ```
 
 use std::num::Wrapping;
+use std::borrow::Cow;
 
 use super::huffman::HuffmanDecoder;
 use super::huffman::HuffmanDecoderError;
@@ -104,7 +105,7 @@ fn decode_integer(buf: &[u8], prefix_size: u8)
 ///
 /// Returns the decoded string in a newly allocated `Vec` and the number of
 /// bytes consumed from the given buffer.
-fn decode_string(buf: &[u8]) -> Result<(Vec<u8>, usize), DecoderError> {
+fn decode_string<'a>(buf: &'a [u8]) -> Result<(Cow<'a, [u8]>, usize), DecoderError> {
     let (len, consumed) = try!(decode_integer(buf, 7));
     debug!("decode_string: Consumed = {}, len = {}", consumed, len);
     if consumed + len > buf.len() {
@@ -125,11 +126,11 @@ fn decode_string(buf: &[u8]) -> Result<(Vec<u8>, usize), DecoderError> {
             },
             Ok(res) => res,
         };
-        Ok((decoded, consumed + len))
+        Ok((Cow::Owned(decoded), consumed + len))
     } else {
         // The octets were transmitted raw
         debug!("decode_string: Raw octet string received");
-        Ok((raw_string.to_vec(), consumed + len))
+        Ok((Cow::Borrowed(raw_string), consumed + len))
     }
 }
 
@@ -361,7 +362,7 @@ impl<'a> Decoder<'a> {
             // Read name string as literal
             let (name, name_len) = try!(decode_string(&buf[consumed..]));
             consumed += name_len;
-            name
+            name.into_owned()
         } else {
             // Read name indexed from the table
             let (name, _) = try!(self.get_from_table(table_index));
@@ -370,6 +371,7 @@ impl<'a> Decoder<'a> {
 
         // Now read the value as a literal...
         let (value, value_len) = try!(decode_string(&buf[consumed..]));
+        let value = value.into_owned();
         consumed += value_len;
 
         if index {
@@ -405,6 +407,9 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::{decode_integer};
+
+    use std::borrow::Cow;
+
     use super::super::encoder::encode_integer;
     use super::FieldRepresentation;
     use super::decode_string;
@@ -556,12 +561,31 @@ mod tests {
 
     #[test]
     fn test_decode_string_no_huffman() {
-        assert_eq!((b"abc".to_vec(), 4),
+        /// Checks that the result matches the expectation, but also that the `Cow` is borrowed!
+        fn assert_borrowed_eq<'a>(expected: (&[u8], usize), result: (Cow<'a, [u8]>, usize)) {
+            let (expected_str, expected_len) = expected;
+            let (actual_str, actual_len) = result;
+            assert_eq!(expected_len, actual_len);
+            match actual_str {
+                Cow::Borrowed(actual) => assert_eq!(actual, expected_str),
+                _ => panic!("Expected the result to be borrowed!"),
+            };
+        }
+
+        assert_eq!((Cow::Borrowed(&b"abc"[..]), 4),
                    decode_string(&[3, b'a', b'b', b'c']).ok().unwrap());
-        assert_eq!((b"a".to_vec(), 2),
+        assert_eq!((Cow::Borrowed(&b"a"[..]), 2),
                    decode_string(&[1, b'a']).ok().unwrap());
-        assert_eq!((b"".to_vec(), 1),
+        assert_eq!((Cow::Borrowed(&b""[..]), 1),
                    decode_string(&[0, b'a']).ok().unwrap());
+
+        assert_borrowed_eq((&b"abc"[..], 4),
+                           decode_string(&[3, b'a', b'b', b'c']).ok().unwrap());
+        assert_borrowed_eq((&b"a"[..], 2),
+                           decode_string(&[1, b'a']).ok().unwrap());
+        assert_borrowed_eq((&b""[..], 1),
+                           decode_string(&[0, b'a']).ok().unwrap());
+
         // Buffer smaller than advertised string length
         assert_eq!(StringDecodingError::NotEnoughOctets,
                    match decode_string(&[3, b'a', b'b']) {
@@ -581,7 +605,7 @@ mod tests {
             encoded.extend(full_string.clone().into_iter());
 
             assert_eq!(
-                (full_string, encoded.len()),
+                (Cow::Owned(full_string), encoded.len()),
                 decode_string(&encoded).ok().unwrap());
         }
         {
@@ -590,7 +614,7 @@ mod tests {
             encoded.extend(full_string.clone().into_iter());
 
             assert_eq!(
-                (full_string, encoded.len()),
+                (Cow::Owned(full_string), encoded.len()),
                 decode_string(&encoded).ok().unwrap());
         }
     }
