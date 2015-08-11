@@ -289,7 +289,7 @@ impl<'a> Decoder<'a> {
                 FieldRepresentation::Indexed => {
                     let ((name, value), consumed) =
                         try!(self.decode_indexed(buffer_leftover));
-                    cb(Cow::Owned(name), Cow::Owned(value));
+                    cb(Cow::Borrowed(name), Cow::Borrowed(value));
 
                     consumed
                 },
@@ -348,13 +348,13 @@ impl<'a> Decoder<'a> {
 
     /// Decodes an indexed header representation.
     fn decode_indexed(&self, buf: &[u8])
-            -> Result<((Vec<u8>, Vec<u8>), usize), DecoderError> {
+            -> Result<((&[u8], &[u8]), usize), DecoderError> {
         let (index, consumed) = try!(decode_integer(buf, 7));
         debug!("Decoding indexed: index = {}, consumed = {}", index, consumed);
 
         let (name, value) = try!(self.get_from_table(index));
 
-        Ok(((name.to_vec(), value.to_vec()), consumed))
+        Ok(((name, value), consumed))
     }
 
     /// Gets the header (name, value) pair with the given index from the table.
