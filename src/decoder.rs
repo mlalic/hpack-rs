@@ -259,14 +259,24 @@ impl<'a> Decoder<'a> {
         self.header_table.dynamic_table.set_max_table_size(new_max_size);
     }
 
-    /// Decode the header block found in the given buffer.
+    /// Decodes the headers found in the given buffer `buf`. Invokes the callback `cb` for each
+    /// decoded header in turn, by providing it the header name and value as `Cow` byte array
+    /// slices.
     ///
-    /// The buffer should represent the entire block that should be decoded.
-    /// For example, in HTTP/2, all continuation frames need to be concatenated
-    /// to a single buffer before passing them to the decoder.
-    pub fn decode(&mut self, buf: &[u8]) -> DecoderResult {
+    /// The callback is free to decide how to handle the emitted header, however the `Cow` cannot
+    /// outlive the closure body without assuming ownership or otherwise copying the contents.
+    ///
+    /// This is due to the fact that the header might be found (fully or partially) in the header
+    /// table of the decoder, in which case the callback will have received a borrow of its
+    /// contents. However, when one of the following headers is decoded, it is possible that the
+    /// header table might have to be modified; so the borrow is only valid until the next header
+    /// decoding begins, meaning until the end of the callback's body.
+    ///
+    /// If an error is encountered during the decoding of any header, decoding halts and the
+    /// appropriate error is returned as the `Err` variant of the `Result`.
+    pub fn decode_with_cb<F>(&mut self, buf: &[u8], mut cb: F) -> Result<(), DecoderError>
+            where F: FnMut(Cow<[u8]>, Cow<[u8]>) {
         let mut current_octet_index = 0;
-        let mut header_list = Vec::new();
 
         while current_octet_index < buf.len() {
             // At this point we are always at the beginning of the next block
@@ -279,21 +289,21 @@ impl<'a> Decoder<'a> {
                 FieldRepresentation::Indexed => {
                     let ((name, value), consumed) =
                         try!(self.decode_indexed(buffer_leftover));
-                    header_list.push((name, value));
+                    cb(Cow::Owned(name), Cow::Owned(value));
 
                     consumed
                 },
                 FieldRepresentation::LiteralWithIncrementalIndexing => {
                     let ((name, value), consumed) =
                         try!(self.decode_literal(buffer_leftover, true));
-                    header_list.push((name, value));
+                    cb(Cow::Owned(name), Cow::Owned(value));
 
                     consumed
                 },
                 FieldRepresentation::LiteralWithoutIndexing => {
                     let ((name, value), consumed) =
                         try!(self.decode_literal(buffer_leftover, false));
-                    header_list.push((name, value));
+                    cb(Cow::Owned(name), Cow::Owned(value));
 
                     consumed
                 },
@@ -304,7 +314,7 @@ impl<'a> Decoder<'a> {
                     // for now.
                     let ((name, value), consumed) =
                         try!(self.decode_literal(buffer_leftover, false));
-                    header_list.push((name, value));
+                    cb(Cow::Owned(name), Cow::Owned(value));
 
                     consumed
                 },
@@ -316,6 +326,22 @@ impl<'a> Decoder<'a> {
 
             current_octet_index += consumed;
         }
+
+        Ok(())
+    }
+
+    /// Decode the header block found in the given buffer.
+    ///
+    /// The decoded representation is returned as a sequence of headers, where both the name and
+    /// value of each header is represented by an owned byte sequence (i.e. `Vec<u8>`).
+    ///
+    /// The buffer should represent the entire block that should be decoded.
+    /// For example, in HTTP/2, all continuation frames need to be concatenated
+    /// to a single buffer before passing them to the decoder.
+    pub fn decode(&mut self, buf: &[u8]) -> DecoderResult {
+        let mut header_list = Vec::new();
+
+        try!(self.decode_with_cb(buf, |n, v| header_list.push((n.into_owned(), v.into_owned()))));
 
         Ok(header_list)
     }
