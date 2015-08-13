@@ -20,6 +20,30 @@
 //!     (b":path".to_vec(), b"/".to_vec()),
 //! ]);
 //! ```
+//!
+//! A more complex example where the callback API is used, providing the client a
+//! borrowed representation of each header, rather than an owned representation.
+//!
+//! ```rust
+//! use hpack::Decoder;
+//! let mut decoder = Decoder::new();
+//!
+//! let mut count = 0;
+//! let header_list = decoder.decode_with_cb(&[0x82, 0x84], |name, value| {
+//!     count += 1;
+//!     match count {
+//!         1 => {
+//!             assert_eq!(&name[..], &b":method"[..]);
+//!             assert_eq!(&value[..], &b"GET"[..]);
+//!         },
+//!         2 => {
+//!             assert_eq!(&name[..], &b":path"[..]);
+//!             assert_eq!(&value[..], &b"/"[..]);
+//!         },
+//!         _ => panic!("Did not expect more than two headers!"),
+//!     };
+//! });
+//! ```
 
 use std::num::Wrapping;
 use std::borrow::Cow;
