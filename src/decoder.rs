@@ -294,16 +294,31 @@ impl<'a> Decoder<'a> {
                     consumed
                 },
                 FieldRepresentation::LiteralWithIncrementalIndexing => {
-                    let ((name, value), consumed) =
-                        try!(self.decode_literal(buffer_leftover, true));
-                    cb(Cow::Owned(name), Cow::Owned(value));
+                    let ((name, value), consumed) = {
+                        let ((name, value), consumed) = try!(
+                            self.decode_literal(buffer_leftover, true));
+                        cb(Cow::Borrowed(&name), Cow::Borrowed(&value));
+
+                        // Since we are to add the decoded header to the header table, we need to
+                        // convert them into owned buffers that the decoder can keep internally.
+                        let name = name.into_owned();
+                        let value = value.into_owned();
+
+                        ((name, value), consumed)
+                    };
+                    // This cannot be done in the same scope as the `decode_literal` call, since
+                    // Rust cannot figure out that the `into_owned` calls effectively drop the
+                    // borrow on `self` that the `decode_literal` return value had. Since adding
+                    // a header to the table requires a `&mut self`, it fails to compile.
+                    // Manually separating it out here works around it...
+                    self.header_table.add_header(name, value);
 
                     consumed
                 },
                 FieldRepresentation::LiteralWithoutIndexing => {
                     let ((name, value), consumed) =
                         try!(self.decode_literal(buffer_leftover, false));
-                    cb(Cow::Owned(name), Cow::Owned(value));
+                    cb(name, value);
 
                     consumed
                 },
@@ -314,7 +329,7 @@ impl<'a> Decoder<'a> {
                     // for now.
                     let ((name, value), consumed) =
                         try!(self.decode_literal(buffer_leftover, false));
-                    cb(Cow::Owned(name), Cow::Owned(value));
+                    cb(name, value);
 
                     consumed
                 },
@@ -374,8 +389,8 @@ impl<'a> Decoder<'a> {
     ///
     /// - index: whether or not the decoded value should be indexed (i.e.
     ///   included in the dynamic table).
-    fn decode_literal(&mut self, buf: &[u8], index: bool)
-            -> Result<((Vec<u8>, Vec<u8>), usize), DecoderError> {
+    fn decode_literal<'b>(&'b self, buf: &'b [u8], index: bool)
+            -> Result<((Cow<[u8]>, Cow<[u8]>), usize), DecoderError> {
         let prefix = if index {
             6
         } else {
@@ -388,25 +403,17 @@ impl<'a> Decoder<'a> {
             // Read name string as literal
             let (name, name_len) = try!(decode_string(&buf[consumed..]));
             consumed += name_len;
-            name.into_owned()
+            name
         } else {
             // Read name indexed from the table
             let (name, _) = try!(self.get_from_table(table_index));
-            name.to_vec()
+            Cow::Borrowed(name)
         };
 
         // Now read the value as a literal...
         let (value, value_len) = try!(decode_string(&buf[consumed..]));
-        let value = value.into_owned();
         consumed += value_len;
 
-        if index {
-            // We add explicit copies to the dynamic table, as we want to
-            // be able to relinquish ownership of the final decoded header
-            // list to the client, but also keep entries in the dynamic table
-            // for decoding the next blocks.
-            self.header_table.add_header(name.clone(), value.clone());
-        }
         Ok(((name, value), consumed))
     }
 
