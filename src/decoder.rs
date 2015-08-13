@@ -20,8 +20,33 @@
 //!     (b":path".to_vec(), b"/".to_vec()),
 //! ]);
 //! ```
+//!
+//! A more complex example where the callback API is used, providing the client a
+//! borrowed representation of each header, rather than an owned representation.
+//!
+//! ```rust
+//! use hpack::Decoder;
+//! let mut decoder = Decoder::new();
+//!
+//! let mut count = 0;
+//! let header_list = decoder.decode_with_cb(&[0x82, 0x84], |name, value| {
+//!     count += 1;
+//!     match count {
+//!         1 => {
+//!             assert_eq!(&name[..], &b":method"[..]);
+//!             assert_eq!(&value[..], &b"GET"[..]);
+//!         },
+//!         2 => {
+//!             assert_eq!(&name[..], &b":path"[..]);
+//!             assert_eq!(&value[..], &b"/"[..]);
+//!         },
+//!         _ => panic!("Did not expect more than two headers!"),
+//!     };
+//! });
+//! ```
 
 use std::num::Wrapping;
+use std::borrow::Cow;
 
 use super::huffman::HuffmanDecoder;
 use super::huffman::HuffmanDecoderError;
@@ -104,7 +129,7 @@ fn decode_integer(buf: &[u8], prefix_size: u8)
 ///
 /// Returns the decoded string in a newly allocated `Vec` and the number of
 /// bytes consumed from the given buffer.
-fn decode_string(buf: &[u8]) -> Result<(Vec<u8>, usize), DecoderError> {
+fn decode_string<'a>(buf: &'a [u8]) -> Result<(Cow<'a, [u8]>, usize), DecoderError> {
     let (len, consumed) = try!(decode_integer(buf, 7));
     debug!("decode_string: Consumed = {}, len = {}", consumed, len);
     if consumed + len > buf.len() {
@@ -125,11 +150,11 @@ fn decode_string(buf: &[u8]) -> Result<(Vec<u8>, usize), DecoderError> {
             },
             Ok(res) => res,
         };
-        Ok((decoded, consumed + len))
+        Ok((Cow::Owned(decoded), consumed + len))
     } else {
         // The octets were transmitted raw
         debug!("decode_string: Raw octet string received");
-        Ok((raw_string.to_vec(), consumed + len))
+        Ok((Cow::Borrowed(raw_string), consumed + len))
     }
 }
 
@@ -258,14 +283,24 @@ impl<'a> Decoder<'a> {
         self.header_table.dynamic_table.set_max_table_size(new_max_size);
     }
 
-    /// Decode the header block found in the given buffer.
+    /// Decodes the headers found in the given buffer `buf`. Invokes the callback `cb` for each
+    /// decoded header in turn, by providing it the header name and value as `Cow` byte array
+    /// slices.
     ///
-    /// The buffer should represent the entire block that should be decoded.
-    /// For example, in HTTP/2, all continuation frames need to be concatenated
-    /// to a single buffer before passing them to the decoder.
-    pub fn decode(&mut self, buf: &[u8]) -> DecoderResult {
+    /// The callback is free to decide how to handle the emitted header, however the `Cow` cannot
+    /// outlive the closure body without assuming ownership or otherwise copying the contents.
+    ///
+    /// This is due to the fact that the header might be found (fully or partially) in the header
+    /// table of the decoder, in which case the callback will have received a borrow of its
+    /// contents. However, when one of the following headers is decoded, it is possible that the
+    /// header table might have to be modified; so the borrow is only valid until the next header
+    /// decoding begins, meaning until the end of the callback's body.
+    ///
+    /// If an error is encountered during the decoding of any header, decoding halts and the
+    /// appropriate error is returned as the `Err` variant of the `Result`.
+    pub fn decode_with_cb<F>(&mut self, buf: &[u8], mut cb: F) -> Result<(), DecoderError>
+            where F: FnMut(Cow<[u8]>, Cow<[u8]>) {
         let mut current_octet_index = 0;
-        let mut header_list = Vec::new();
 
         while current_octet_index < buf.len() {
             // At this point we are always at the beginning of the next block
@@ -278,21 +313,36 @@ impl<'a> Decoder<'a> {
                 FieldRepresentation::Indexed => {
                     let ((name, value), consumed) =
                         try!(self.decode_indexed(buffer_leftover));
-                    header_list.push((name, value));
+                    cb(Cow::Borrowed(name), Cow::Borrowed(value));
 
                     consumed
                 },
                 FieldRepresentation::LiteralWithIncrementalIndexing => {
-                    let ((name, value), consumed) =
-                        try!(self.decode_literal(buffer_leftover, true));
-                    header_list.push((name, value));
+                    let ((name, value), consumed) = {
+                        let ((name, value), consumed) = try!(
+                            self.decode_literal(buffer_leftover, true));
+                        cb(Cow::Borrowed(&name), Cow::Borrowed(&value));
+
+                        // Since we are to add the decoded header to the header table, we need to
+                        // convert them into owned buffers that the decoder can keep internally.
+                        let name = name.into_owned();
+                        let value = value.into_owned();
+
+                        ((name, value), consumed)
+                    };
+                    // This cannot be done in the same scope as the `decode_literal` call, since
+                    // Rust cannot figure out that the `into_owned` calls effectively drop the
+                    // borrow on `self` that the `decode_literal` return value had. Since adding
+                    // a header to the table requires a `&mut self`, it fails to compile.
+                    // Manually separating it out here works around it...
+                    self.header_table.add_header(name, value);
 
                     consumed
                 },
                 FieldRepresentation::LiteralWithoutIndexing => {
                     let ((name, value), consumed) =
                         try!(self.decode_literal(buffer_leftover, false));
-                    header_list.push((name, value));
+                    cb(name, value);
 
                     consumed
                 },
@@ -303,7 +353,7 @@ impl<'a> Decoder<'a> {
                     // for now.
                     let ((name, value), consumed) =
                         try!(self.decode_literal(buffer_leftover, false));
-                    header_list.push((name, value));
+                    cb(name, value);
 
                     consumed
                 },
@@ -316,18 +366,34 @@ impl<'a> Decoder<'a> {
             current_octet_index += consumed;
         }
 
+        Ok(())
+    }
+
+    /// Decode the header block found in the given buffer.
+    ///
+    /// The decoded representation is returned as a sequence of headers, where both the name and
+    /// value of each header is represented by an owned byte sequence (i.e. `Vec<u8>`).
+    ///
+    /// The buffer should represent the entire block that should be decoded.
+    /// For example, in HTTP/2, all continuation frames need to be concatenated
+    /// to a single buffer before passing them to the decoder.
+    pub fn decode(&mut self, buf: &[u8]) -> DecoderResult {
+        let mut header_list = Vec::new();
+
+        try!(self.decode_with_cb(buf, |n, v| header_list.push((n.into_owned(), v.into_owned()))));
+
         Ok(header_list)
     }
 
     /// Decodes an indexed header representation.
     fn decode_indexed(&self, buf: &[u8])
-            -> Result<((Vec<u8>, Vec<u8>), usize), DecoderError> {
+            -> Result<((&[u8], &[u8]), usize), DecoderError> {
         let (index, consumed) = try!(decode_integer(buf, 7));
         debug!("Decoding indexed: index = {}, consumed = {}", index, consumed);
 
         let (name, value) = try!(self.get_from_table(index));
 
-        Ok(((name.to_vec(), value.to_vec()), consumed))
+        Ok(((name, value), consumed))
     }
 
     /// Gets the header (name, value) pair with the given index from the table.
@@ -347,8 +413,8 @@ impl<'a> Decoder<'a> {
     ///
     /// - index: whether or not the decoded value should be indexed (i.e.
     ///   included in the dynamic table).
-    fn decode_literal(&mut self, buf: &[u8], index: bool)
-            -> Result<((Vec<u8>, Vec<u8>), usize), DecoderError> {
+    fn decode_literal<'b>(&'b self, buf: &'b [u8], index: bool)
+            -> Result<((Cow<[u8]>, Cow<[u8]>), usize), DecoderError> {
         let prefix = if index {
             6
         } else {
@@ -365,20 +431,13 @@ impl<'a> Decoder<'a> {
         } else {
             // Read name indexed from the table
             let (name, _) = try!(self.get_from_table(table_index));
-            name.to_vec()
+            Cow::Borrowed(name)
         };
 
         // Now read the value as a literal...
         let (value, value_len) = try!(decode_string(&buf[consumed..]));
         consumed += value_len;
 
-        if index {
-            // We add explicit copies to the dynamic table, as we want to
-            // be able to relinquish ownership of the final decoded header
-            // list to the client, but also keep entries in the dynamic table
-            // for decoding the next blocks.
-            self.header_table.add_header(name.clone(), value.clone());
-        }
         Ok(((name, value), consumed))
     }
 
@@ -405,6 +464,9 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::{decode_integer};
+
+    use std::borrow::Cow;
+
     use super::super::encoder::encode_integer;
     use super::FieldRepresentation;
     use super::decode_string;
@@ -556,12 +618,31 @@ mod tests {
 
     #[test]
     fn test_decode_string_no_huffman() {
-        assert_eq!((b"abc".to_vec(), 4),
+        /// Checks that the result matches the expectation, but also that the `Cow` is borrowed!
+        fn assert_borrowed_eq<'a>(expected: (&[u8], usize), result: (Cow<'a, [u8]>, usize)) {
+            let (expected_str, expected_len) = expected;
+            let (actual_str, actual_len) = result;
+            assert_eq!(expected_len, actual_len);
+            match actual_str {
+                Cow::Borrowed(actual) => assert_eq!(actual, expected_str),
+                _ => panic!("Expected the result to be borrowed!"),
+            };
+        }
+
+        assert_eq!((Cow::Borrowed(&b"abc"[..]), 4),
                    decode_string(&[3, b'a', b'b', b'c']).ok().unwrap());
-        assert_eq!((b"a".to_vec(), 2),
+        assert_eq!((Cow::Borrowed(&b"a"[..]), 2),
                    decode_string(&[1, b'a']).ok().unwrap());
-        assert_eq!((b"".to_vec(), 1),
+        assert_eq!((Cow::Borrowed(&b""[..]), 1),
                    decode_string(&[0, b'a']).ok().unwrap());
+
+        assert_borrowed_eq((&b"abc"[..], 4),
+                           decode_string(&[3, b'a', b'b', b'c']).ok().unwrap());
+        assert_borrowed_eq((&b"a"[..], 2),
+                           decode_string(&[1, b'a']).ok().unwrap());
+        assert_borrowed_eq((&b""[..], 1),
+                           decode_string(&[0, b'a']).ok().unwrap());
+
         // Buffer smaller than advertised string length
         assert_eq!(StringDecodingError::NotEnoughOctets,
                    match decode_string(&[3, b'a', b'b']) {
@@ -581,7 +662,7 @@ mod tests {
             encoded.extend(full_string.clone().into_iter());
 
             assert_eq!(
-                (full_string, encoded.len()),
+                (Cow::Owned(full_string), encoded.len()),
                 decode_string(&encoded).ok().unwrap());
         }
         {
@@ -590,7 +671,7 @@ mod tests {
             encoded.extend(full_string.clone().into_iter());
 
             assert_eq!(
-                (full_string, encoded.len()),
+                (Cow::Owned(full_string), encoded.len()),
                 decode_string(&encoded).ok().unwrap());
         }
     }
