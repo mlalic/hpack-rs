@@ -182,7 +182,8 @@ impl<'a> Encoder<'a> {
     }
 
     /// Encodes the given headers using the HPACK rules and returns a newly
-    /// allocated `Vec` containing the bytes representing the encoded header /// set.
+    /// allocated `Vec` containing the bytes representing the encoded header
+    /// set.
     ///
     /// The encoder so far supports only a single, extremely simple encoding
     /// strategy, whereby each header is represented as an indexed header if
@@ -191,32 +192,55 @@ impl<'a> Encoder<'a> {
     /// found either (i.e. there are never two header names with different
     /// values in the produced header table). Strings are always encoded as
     /// literals (Huffman encoding is not used).
-    pub fn encode<'b, I : IntoIterator<Item=(&'b [u8], &'b [u8])>>(&mut self, headers: I) -> Vec<u8> {
+    pub fn encode<'b, I>(&mut self, headers: I) -> Vec<u8>
+            where I: IntoIterator<Item=(&'b [u8], &'b [u8])> {
         let mut encoded: Vec<u8> = Vec::new();
-
-        for header in headers {
-            match self.header_table.find_header((&header.0, &header.1)) {
-                None => {
-                    // The name of the header is in no tables: need to encode
-                    // it with both a literal name and value.
-                    self.encode_literal(&header, true, &mut encoded);
-                    self.header_table.add_header(header.0.to_vec(), header.1.to_vec());
-                },
-                Some((index, false)) => {
-                    // The name of the header is at the given index, but the
-                    // value does not match the current one: need to encode
-                    // only the value as a literal.
-                    self.encode_indexed_name((index, header.1), false, &mut encoded);
-                },
-                Some((index, true)) => {
-                    // The full header was found in one of the tables, so we
-                    // just encode the index.
-                    self.encode_indexed(index, &mut encoded);
-                }
-            };
-        }
-
+        self.encode_into(headers, &mut encoded).unwrap();
         encoded
+    }
+
+    /// Encodes the given headers into the given `io::Write` instance. If the io::Write raises an
+    /// Error at any point, this error is propagated out. Any changes to the internal state of the
+    /// encoder will not be rolled back, though, so care should be taken to ensure that the paired
+    /// decoder also ends up seeing the same state updates or that their pairing is cancelled.
+    pub fn encode_into<'b, I, W>(&mut self, headers: I, writer: &mut W) -> io::Result<()>
+            where I: IntoIterator<Item=(&'b [u8], &'b [u8])>,
+                  W: io::Write {
+        for header in headers {
+            try!(self.encode_header_into(header, writer));
+        }
+        Ok(())
+    }
+
+    /// Encodes a single given header into the given `io::Write` instance.
+    ///
+    /// Any errors are propagated, similarly to the `encode_into` method, and it is the callers
+    /// responsiblity to make sure that the paired encoder sees them too.
+    pub fn encode_header_into<W: io::Write>(
+            &mut self,
+            header: (&[u8], &[u8]),
+            writer: &mut W)
+            -> io::Result<()> {
+        match self.header_table.find_header(header) {
+            None => {
+                // The name of the header is in no tables: need to encode
+                // it with both a literal name and value.
+                try!(self.encode_literal(&header, true, writer));
+                self.header_table.add_header(header.0.to_vec(), header.1.to_vec());
+            },
+            Some((index, false)) => {
+                // The name of the header is at the given index, but the
+                // value does not match the current one: need to encode
+                // only the value as a literal.
+                try!(self.encode_indexed_name((index, header.1), false, writer));
+            },
+            Some((index, true)) => {
+                // The full header was found in one of the tables, so we
+                // just encode the index.
+                try!(self.encode_indexed(index, writer));
+            }
+        };
+        Ok(())
     }
 
     /// Encodes a header as a literal (i.e. both the name and the value are
