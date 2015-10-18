@@ -44,40 +44,89 @@
 //! // indicating that the indexed representation is used).
 //! assert_eq!(encoder.encode(headers), vec![2 | 0x80, 4 | 0x80]);
 //! ```
+use std::io;
 use std::num::Wrapping;
 
 use super::STATIC_TABLE;
 use super::HeaderTable;
 
+/// Encode an integer to the representation defined by HPACK, writing it into the provider
+/// `io::Write` instance. Also allows the caller to specify the leading bits of the first
+/// octet. Any bits that are already set within the last `prefix_size` bits will be cleared
+/// and overwritten by the integer's representation (in other words, only the first
+/// `8 - prefix_size` bits from the `leading_bits` octet are reflected in the first octet
+/// emitted by the function.
+///
+/// # Example
+///
+/// ```rust
+/// use hpack::encoder::encode_integer_into;
+///
+/// {
+///     // No bits specified in the 3 most significant bits of the first octet
+///     let mut vec = Vec::new();
+///     encode_integer_into(10, 5, 0, &mut vec);
+///     assert_eq!(vec, vec![10]);
+/// }
+/// {
+///     // The most significant bit should be set; i.e. the 3 most significant
+///     // bits are 100.
+///     let mut vec = Vec::new();
+///     encode_integer_into(10, 5, 0x80, &mut vec);
+///     assert_eq!(vec, vec![0x8A]);
+/// }
+/// {
+///     // The most leading bits number has a bit set within the last prefix-size
+///     // bits -- they are ignored by the function
+///     // bits are 100.
+///     let mut vec = Vec::new();
+///     encode_integer_into(10, 5, 0x10, &mut vec);
+///     assert_eq!(vec, vec![0x0A]);
+/// }
+/// {
+///     let mut vec = Vec::new();
+///     encode_integer_into(1337, 5, 0, &mut vec);
+///     assert_eq!(vec, vec![31, 154, 10]);
+/// }
+/// ```
+pub fn encode_integer_into<W: io::Write>(
+        mut value: usize,
+        prefix_size: u8,
+        leading_bits: u8,
+        writer: &mut W)
+        -> io::Result<()> {
+    let Wrapping(mask) = if prefix_size >= 8 {
+        Wrapping(0xFF)
+    } else {
+        Wrapping(1u8 << prefix_size) - Wrapping(1)
+    };
+    // Clear any bits within the last `prefix_size` bits of the provided `leading_bits`.
+    // Failing to do so might lead to an incorrect encoding of the integer.
+    let leading_bits = leading_bits & (!mask);
+    let mask = mask as usize;
+    if value < mask {
+        try!(writer.write_all(&[leading_bits | value as u8]));
+        return Ok(());
+    }
+
+    try!(writer.write_all(&[leading_bits | mask as u8]));
+    value -= mask;
+    while value >= 128 {
+        try!(writer.write_all(&[((value % 128) + 128) as u8]));
+        value = value / 128;
+    }
+    try!(writer.write_all(&[value as u8]));
+    Ok(())
+}
 
 /// Encode an integer to the representation defined by HPACK.
 ///
 /// Returns a newly allocated `Vec` containing the encoded bytes.
 /// Only `prefix_size` lowest-order bits of the first byte in the
 /// array are guaranteed to be used.
-pub fn encode_integer(mut value: usize, prefix_size: u8) -> Vec<u8> {
-    let Wrapping(mask) = if prefix_size >= 8 {
-        Wrapping(0xFF)
-    } else {
-        Wrapping(1u8 << prefix_size) - Wrapping(1)
-    };
-    let mask = mask as usize;
-    if value < mask {
-        // Right now, the caller would need to be the one to combine
-        // the other part of the prefix byte (but would know that it's
-        // safe to do so using the bit-wise or).
-        return vec![value as u8];
-    }
-
-    let mut res: Vec<u8> = Vec::new();
-    res.push(mask as u8);
-    value -= mask;
-    while value >= 128 {
-        res.push(((value % 128) + 128) as u8);
-        value = value / 128;
-    }
-    res.push(value as u8);
-
+pub fn encode_integer(value: usize, prefix_size: u8) -> Vec<u8> {
+    let mut res = Vec::new();
+    encode_integer_into(value, prefix_size, 0, &mut res).unwrap();
     res
 }
 
