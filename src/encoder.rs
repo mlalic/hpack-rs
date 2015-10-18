@@ -230,19 +230,22 @@ impl<'a> Encoder<'a> {
     ///                    inserted into the dynamic table
     /// - `buf` - The buffer into which the result is placed
     ///
-    fn encode_literal(&mut self,
-                      header: &(&[u8], &[u8]),
-                      should_index: bool,
-                      buf: &mut Vec<u8>) {
+    fn encode_literal<W: io::Write>(
+            &mut self,
+            header: &(&[u8], &[u8]),
+            should_index: bool,
+            buf: &mut W)
+            -> io::Result<()> {
         let mask = if should_index {
             0x40
         } else {
             0x0
         };
 
-        buf.push(mask);
-        self.encode_string_literal(&header.0, buf);
-        self.encode_string_literal(&header.1, buf);
+        try!(buf.write_all(&[mask]));
+        try!(self.encode_string_literal(&header.0, buf));
+        try!(self.encode_string_literal(&header.1, buf));
+        Ok(())
     }
 
     /// Encodes a string literal and places the result in the given buffer
@@ -251,38 +254,45 @@ impl<'a> Encoder<'a> {
     /// The function does not consider Huffman encoding for now, but always
     /// produces a string literal representations, according to the HPACK spec
     /// section 5.2.
-    fn encode_string_literal(&mut self, octet_str: &[u8], buf: &mut Vec<u8>) {
-        buf.extend(encode_integer(octet_str.len(), 7).into_iter());
-        buf.extend(octet_str.to_vec().into_iter());
+    fn encode_string_literal<W: io::Write>(
+            &mut self,
+            octet_str: &[u8],
+            buf: &mut W)
+            -> io::Result<()> {
+        try!(encode_integer_into(octet_str.len(), 7, 0, buf));
+        try!(buf.write_all(octet_str));
+        Ok(())
     }
 
     /// Encodes a header whose name is indexed and places the result in the
     /// given buffer `buf`.
-    fn encode_indexed_name(&mut self, header: (usize, &[u8]), should_index: bool, buf: &mut Vec<u8>) {
+    fn encode_indexed_name<W: io::Write>(
+            &mut self,
+            header: (usize, &[u8]),
+            should_index: bool,
+            buf: &mut W)
+            -> io::Result<()> {
         let (mask, prefix) = if should_index {
             (0x40, 6)
         } else {
             (0x0, 4)
         };
 
-        let mut encoded_index = encode_integer(header.0, prefix);
-        encoded_index[0] |= mask;
-        buf.extend(encoded_index.into_iter());
+        try!(encode_integer_into(header.0, prefix, mask, buf));
         // So far, we rely on just one strategy for encoding string literals.
-        self.encode_string_literal(&header.1, buf);
+        try!(self.encode_string_literal(&header.1, buf));
+        Ok(())
     }
 
     /// Encodes an indexed header (a header that is fully in the header table)
     /// and places the result in the given buffer `buf`.
     ///
     /// The encoding is according to the rules of the HPACK spec, section 6.1.
-    fn encode_indexed(&self, index: usize, buf: &mut Vec<u8>) {
-        let mut encoded = encode_integer(index, 7);
+    fn encode_indexed<W: io::Write>(&self, index: usize, buf: &mut W) -> io::Result<()> {
         // We need to set the most significant bit, since the bit-pattern is
         // `1xxxxxxx` for indexed headers.
-        encoded[0] |= 0x80;
-
-        buf.extend(encoded.into_iter());
+        try!(encode_integer_into(index, 7, 0x80, buf));
+        Ok(())
     }
 }
 
