@@ -2,22 +2,25 @@
 //! performing the encoding and decoding of header sets, according to the
 //! HPACK spec.
 
-#[macro_use] extern crate log;
-#[cfg(feature="interop_tests")]
+#[macro_use]
+extern crate log;
+#[cfg(feature = "interop_tests")]
 extern crate rustc_serialize;
 
+use std::collections::vec_deque;
+use std::collections::VecDeque;
 use std::fmt;
 use std::iter;
 use std::slice;
-use std::collections::VecDeque;
-use std::collections::vec_deque;
+
+use decoder::DecoderError;
 
 // Re-export the main HPACK API entry points.
 pub use self::decoder::Decoder;
 pub use self::encoder::Encoder;
 
-pub mod encoder;
 pub mod decoder;
+pub mod encoder;
 pub mod huffman;
 
 /// An `Iterator` through elements of the `DynamicTable`.
@@ -31,7 +34,7 @@ pub mod huffman;
 struct DynamicTableIter<'a> {
     /// Stores an iterator through the underlying structure that the
     /// `DynamicTable` uses
-    inner: vec_deque::Iter<'a, (Vec<u8>, Vec<u8>)>,
+    inner: vec_deque::Iter<'a, Option<(Vec<u8>, Vec<u8>)>>,
 }
 
 impl<'a> Iterator for DynamicTableIter<'a> {
@@ -39,7 +42,10 @@ impl<'a> Iterator for DynamicTableIter<'a> {
 
     fn next(&mut self) -> Option<(&'a [u8], &'a [u8])> {
         match self.inner.next() {
-            Some(ref header) => Some((&header.0, &header.1)),
+            Some(header) => match header {
+                Some(ref h) => Some((&h.0, &h.1)),
+                None => None,
+            },
             None => None,
         }
     }
@@ -71,9 +77,10 @@ impl<'a> Iterator for DynamicTableIter<'a> {
 /// *it* worry about making certain that the changes are valid according to
 /// the (current) constraints of the protocol.
 struct DynamicTable {
-    table: VecDeque<(Vec<u8>, Vec<u8>)>,
+    table: VecDeque<Option<(Vec<u8>, Vec<u8>)>>,
     size: usize,
     max_size: usize,
+    header_filter: fn(&[u8]) -> bool,
 }
 
 impl DynamicTable {
@@ -81,21 +88,27 @@ impl DynamicTable {
     fn new() -> DynamicTable {
         // The default maximum size corresponds to the default HTTP/2
         // setting
-        DynamicTable::with_size(4096)
+        DynamicTable::with_size(4096, |_| true)
+    }
+
+    /// Creates a new empty dynamic table with a header_filter.
+    fn new_with_header_filter(header_filter: fn(&[u8]) -> bool) -> DynamicTable {
+        DynamicTable::with_size(4096, header_filter)
     }
 
     /// Creates a new empty dynamic table with the given maximum size.
-    fn with_size(max_size: usize) -> DynamicTable {
+    fn with_size(max_size: usize, header_filter: fn(&[u8]) -> bool) -> DynamicTable {
         DynamicTable {
             table: VecDeque::new(),
             size: 0,
-            max_size: max_size,
+            max_size,
+            header_filter,
         }
     }
 
     /// Returns the current size of the table in octets, as defined by the IETF
     /// HPACK spec.
-    fn get_size(&self) -> usize {
+    pub fn get_size(&self) -> usize {
         self.size
     }
 
@@ -136,14 +149,28 @@ impl DynamicTable {
     /// is not found in the dynamic table after this operation finishes, in
     /// case the total size of the given header exceeds the maximum size of the
     /// dynamic table.
-    fn add_header(&mut self, name: Vec<u8>, value: Vec<u8>) {
+    fn add_header(&mut self, name_value: Option<(Vec<u8>, Vec<u8>)>) {
         // This is how the HPACK spec makes us calculate the size.  The 32 is
         // a magic number determined by them (under reasonable assumptions of
         // how the table is stored).
-        self.size += name.len() + value.len() + 32;
-        debug!("New dynamic table size {}", self.size);
+        if let Some(nv) = name_value {
+            let (name, value) = nv;
+            if (self.header_filter)(name.to_ascii_lowercase().as_slice()) {
+                self.size += name.len() + value.len() + 32;
+                debug!("New dynamic table size {}", self.size);
+                self.table.push_front(Some((name, value)));
+            } else {
+                self.size += 32;
+                debug!("New dynamic table size {}", self.size);
+                self.table.push_front(None);
+            }
+        } else {
+            self.size += 32;
+            debug!("New dynamic table size {}", self.size);
+            self.table.push_front(None);
+        }
+
         // Now add it to the internal buffer
-        self.table.push_front((name, value));
         // ...and make sure we're not over the maximum size.
         self.consolidate_table();
         debug!("After consolidation dynamic table size {}", self.size);
@@ -163,7 +190,9 @@ impl DynamicTable {
                         panic!("Size of table != 0, but no headers left!");
                     }
                 };
-                self.size -= last_header.0.len() + last_header.1.len() + 32;
+                if let Some(l) = last_header {
+                    self.size -= l.0.len() + l.1.len() + 32;
+                }
             }
             self.table.pop_back();
         }
@@ -177,8 +206,8 @@ impl DynamicTable {
     }
 
     /// Converts the current state of the table to a `Vec`
-    fn to_vec(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let mut ret: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    fn to_vec(&self) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut ret: Vec<Option<(Vec<u8>, Vec<u8>)>> = Vec::new();
         for elem in self.table.iter() {
             ret.push(elem.clone());
         }
@@ -189,7 +218,10 @@ impl DynamicTable {
     /// Returns a reference to the header at the given index, if found in the
     /// dynamic table.
     fn get(&self, index: usize) -> Option<&(Vec<u8>, Vec<u8>)> {
-        self.table.get(index)
+        match self.table.get(index) {
+            Some(kv) => kv.as_ref(),
+            None => None,
+        }
     }
 }
 
@@ -219,10 +251,12 @@ struct HeaderTableIter<'a> {
     // The mapper is required to transform the elements yielded from the static
     // table to a type that matches the elements yielded from the dynamic table.
     inner: iter::Chain<
-            iter::Map<
-                slice::Iter<'a, (&'a [u8], &'a [u8])>,
-                fn((&'a (&'a [u8], &'a [u8]))) -> (&'a [u8], &'a [u8])>,
-            DynamicTableIter<'a>>,
+        iter::Map<
+            slice::Iter<'a, (&'a [u8], &'a [u8])>,
+            fn(&'a (&'a [u8], &'a [u8])) -> (&'a [u8], &'a [u8]),
+        >,
+        DynamicTableIter<'a>,
+    >,
 }
 
 impl<'a> Iterator for HeaderTableIter<'a> {
@@ -242,8 +276,7 @@ impl<'a> Iterator for HeaderTableIter<'a> {
 /// `HeaderTableIter` we need to be able to refer to a real type for the Fn
 /// template parameter, which means that when instantiating an instance, a
 /// closure cannot be passed, since it cannot be named.
-fn static_table_mapper<'a>(h: &'a (&'a [u8], &'a [u8]))
-        -> (&'a [u8], &'a [u8]) {
+fn static_table_mapper<'a>(h: &'a (&'a [u8], &'a [u8])) -> (&'a [u8], &'a [u8]) {
     *h
 }
 
@@ -260,8 +293,20 @@ impl<'a> HeaderTable<'a> {
     /// the given static table.
     pub fn with_static_table(static_table: StaticTable<'a>) -> HeaderTable<'a> {
         HeaderTable {
-            static_table: static_table,
+            static_table,
             dynamic_table: DynamicTable::new(),
+        }
+    }
+
+    /// Creates a new header table where the static part is initialized with
+    /// the given static table and the header filter.
+    pub fn with_header_filter(
+        static_table: StaticTable<'a>,
+        header_filter: fn(&[u8]) -> bool,
+    ) -> HeaderTable<'a> {
+        HeaderTable {
+            static_table,
+            dynamic_table: DynamicTable::new_with_header_filter(header_filter),
         }
     }
 
@@ -275,10 +320,11 @@ impl<'a> HeaderTable<'a> {
     /// corresponds to the header name, value pairs in the described order.
     pub fn iter(&'a self) -> HeaderTableIter<'a> {
         HeaderTableIter {
-            inner: self.static_table.iter()
-                                    .map(static_table_mapper as
-                                            fn((&'a (&'a [u8], &'a [u8]))) -> (&'a [u8], &'a [u8]))
-                                    .chain(self.dynamic_table.iter()),
+            inner: self
+                .static_table
+                .iter()
+                .map(static_table_mapper as fn(&'a (&'a [u8], &'a [u8])) -> (&'a [u8], &'a [u8]))
+                .chain(self.dynamic_table.iter()),
         }
     }
 
@@ -289,8 +335,8 @@ impl<'a> HeaderTable<'a> {
     /// size of the dynamic table, the effect will be that the dynamic table
     /// gets emptied and the new header does *not* get inserted into it.
     #[inline]
-    pub fn add_header(&mut self, name: Vec<u8>, value: Vec<u8>) {
-        self.dynamic_table.add_header(name, value);
+    pub fn add_header(&mut self, name_value: Option<(Vec<u8>, Vec<u8>)>) {
+        self.dynamic_table.add_header(name_value);
     }
 
     /// Returns a reference to the header (a `(name, value)` pair) with the
@@ -302,33 +348,30 @@ impl<'a> HeaderTable<'a> {
     ///
     /// This is according to the [HPACK spec, section 2.3.3.]
     /// (http://http2.github.io/http2-spec/compression.html#index.address.space)
-    pub fn get_from_table(&self, index: usize)
-            -> Option<(&[u8], &[u8])> {
+    pub fn get_from_table(&self, index: usize) -> Result<Option<(&[u8], &[u8])>, DecoderError> {
         // The IETF defined table indexing as 1-based.
         // So, before starting, make sure the given index is within the proper
         // bounds.
         let real_index = if index > 0 {
             index - 1
         } else {
-            return None
+            return Err(DecoderError::HeaderIndexOutOfBounds);
         };
 
         if real_index < self.static_table.len() {
             // It is in the static table so just return that...
-            Some(self.static_table[real_index])
+            Ok(Some(self.static_table[real_index]))
         } else {
             // Maybe it's in the dynamic table then?
             let dynamic_index = real_index - self.static_table.len();
             if dynamic_index < self.dynamic_table.len() {
                 match self.dynamic_table.get(dynamic_index) {
-                    Some(&(ref name, ref value)) => {
-                        Some((name, value))
-                    },
-                    None => None
+                    Some(&(ref name, ref value)) => Ok(Some((name, value))),
+                    None => Ok(None),
                 }
             } else {
                 // Index out of bounds!
-                None
+                Err(DecoderError::HeaderIndexOutOfBounds)
             }
         }
     }
@@ -379,67 +422,67 @@ impl<'a> HeaderTable<'a> {
 /// The table represents the static header table defined by the HPACK spec.
 /// (HPACK, Appendix A)
 static STATIC_TABLE: &'static [(&'static [u8], &'static [u8])] = &[
-  (b":authority", b""),
-  (b":method", b"GET"),
-  (b":method", b"POST"),
-  (b":path", b"/"),
-  (b":path", b"/index.html"),
-  (b":scheme", b"http"),
-  (b":scheme", b"https"),
-  (b":status", b"200"),
-  (b":status", b"204"),
-  (b":status", b"206"),
-  (b":status", b"304"),
-  (b":status", b"400"),
-  (b":status", b"404"),
-  (b":status", b"500"),
-  (b"accept-", b""),
-  (b"accept-encoding", b"gzip, deflate"),
-  (b"accept-language", b""),
-  (b"accept-ranges", b""),
-  (b"accept", b""),
-  (b"access-control-allow-origin", b""),
-  (b"age", b""),
-  (b"allow", b""),
-  (b"authorization", b""),
-  (b"cache-control", b""),
-  (b"content-disposition", b""),
-  (b"content-encoding", b""),
-  (b"content-language", b""),
-  (b"content-length", b""),
-  (b"content-location", b""),
-  (b"content-range", b""),
-  (b"content-type", b""),
-  (b"cookie", b""),
-  (b"date", b""),
-  (b"etag", b""),
-  (b"expect", b""),
-  (b"expires", b""),
-  (b"from", b""),
-  (b"host", b""),
-  (b"if-match", b""),
-  (b"if-modified-since", b""),
-  (b"if-none-match", b""),
-  (b"if-range", b""),
-  (b"if-unmodified-since", b""),
-  (b"last-modified", b""),
-  (b"link", b""),
-  (b"location", b""),
-  (b"max-forwards", b""),
-  (b"proxy-authenticate", b""),
-  (b"proxy-authorization", b""),
-  (b"range", b""),
-  (b"referer", b""),
-  (b"refresh", b""),
-  (b"retry-after", b""),
-  (b"server", b""),
-  (b"set-cookie", b""),
-  (b"strict-transport-security", b""),
-  (b"transfer-encoding", b""),
-  (b"user-agent", b""),
-  (b"vary", b""),
-  (b"via", b""),
-  (b"www-authenticate", b""),
+    (b":authority", b""),
+    (b":method", b"GET"),
+    (b":method", b"POST"),
+    (b":path", b"/"),
+    (b":path", b"/index.html"),
+    (b":scheme", b"http"),
+    (b":scheme", b"https"),
+    (b":status", b"200"),
+    (b":status", b"204"),
+    (b":status", b"206"),
+    (b":status", b"304"),
+    (b":status", b"400"),
+    (b":status", b"404"),
+    (b":status", b"500"),
+    (b"accept-", b""),
+    (b"accept-encoding", b"gzip, deflate"),
+    (b"accept-language", b""),
+    (b"accept-ranges", b""),
+    (b"accept", b""),
+    (b"access-control-allow-origin", b""),
+    (b"age", b""),
+    (b"allow", b""),
+    (b"authorization", b""),
+    (b"cache-control", b""),
+    (b"content-disposition", b""),
+    (b"content-encoding", b""),
+    (b"content-language", b""),
+    (b"content-length", b""),
+    (b"content-location", b""),
+    (b"content-range", b""),
+    (b"content-type", b""),
+    (b"cookie", b""),
+    (b"date", b""),
+    (b"etag", b""),
+    (b"expect", b""),
+    (b"expires", b""),
+    (b"from", b""),
+    (b"host", b""),
+    (b"if-match", b""),
+    (b"if-modified-since", b""),
+    (b"if-none-match", b""),
+    (b"if-range", b""),
+    (b"if-unmodified-since", b""),
+    (b"last-modified", b""),
+    (b"link", b""),
+    (b"location", b""),
+    (b"max-forwards", b""),
+    (b"proxy-authenticate", b""),
+    (b"proxy-authorization", b""),
+    (b"range", b""),
+    (b"referer", b""),
+    (b"refresh", b""),
+    (b"retry-after", b""),
+    (b"server", b""),
+    (b"set-cookie", b""),
+    (b"strict-transport-security", b""),
+    (b"transfer-encoding", b""),
+    (b"user-agent", b""),
+    (b"vary", b""),
+    (b"via", b""),
+    (b"www-authenticate", b""),
 ];
 
 #[cfg(test)]
@@ -454,7 +497,7 @@ mod tests {
         // Sanity check
         assert_eq!(0, table.get_size());
 
-        table.add_header(b"a".to_vec(), b"b".to_vec());
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
 
         assert_eq!(32 + 2, table.get_size());
     }
@@ -463,9 +506,9 @@ mod tests {
     fn test_dynamic_table_size_calculation() {
         let mut table = DynamicTable::new();
 
-        table.add_header(b"a".to_vec(), b"b".to_vec());
-        table.add_header(b"123".to_vec(), b"456".to_vec());
-        table.add_header(b"a".to_vec(), b"b".to_vec());
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
+        table.add_header(Some((b"123".to_vec(), b"456".to_vec())));
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
 
         assert_eq!(3 * 32 + 2 + 6 + 2, table.get_size());
     }
@@ -474,28 +517,30 @@ mod tests {
     /// headers) if it exceeds the maximum size on an insertion.
     #[test]
     fn test_dynamic_table_auto_resize() {
-        let mut table = DynamicTable::with_size(38);
-        table.add_header(b"a".to_vec(), b"b".to_vec());
+        let mut table = DynamicTable::with_size(38, |_| true);
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
         assert_eq!(32 + 2, table.get_size());
 
-        table.add_header(b"123".to_vec(), b"456".to_vec());
+        table.add_header(Some((b"123".to_vec(), b"456".to_vec())));
 
         // Resized?
         assert_eq!(32 + 6, table.get_size());
         // Only has the second header?
-        assert_eq!(table.to_vec(), vec![
-            (b"123".to_vec(), b"456".to_vec())]);
+        assert_eq!(
+            table.to_vec(),
+            vec![Some((b"123".to_vec(), b"456".to_vec()))]
+        );
     }
 
     /// Tests that when inserting a new header whose size is larger than the
     /// size of the entire table, the table is fully emptied.
     #[test]
     fn test_dynamic_table_auto_resize_into_empty() {
-        let mut table = DynamicTable::with_size(38);
-        table.add_header(b"a".to_vec(), b"b".to_vec());
+        let mut table = DynamicTable::with_size(38, |_| true);
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
         assert_eq!(32 + 2, table.get_size());
 
-        table.add_header(b"123".to_vec(), b"4567".to_vec());
+        table.add_header(Some((b"123".to_vec(), b"4567".to_vec())));
 
         // Resized and empty?
         assert_eq!(0, table.get_size());
@@ -508,16 +553,15 @@ mod tests {
     #[test]
     fn test_dynamic_table_change_max_size() {
         let mut table = DynamicTable::new();
-        table.add_header(b"a".to_vec(), b"b".to_vec());
-        table.add_header(b"123".to_vec(), b"456".to_vec());
-        table.add_header(b"c".to_vec(), b"d".to_vec());
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
+        table.add_header(Some((b"123".to_vec(), b"456".to_vec())));
+        table.add_header(Some((b"c".to_vec(), b"d".to_vec())));
         assert_eq!(3 * 32 + 2 + 6 + 2, table.get_size());
 
         table.set_max_table_size(38);
 
         assert_eq!(32 + 2, table.get_size());
-        assert_eq!(table.to_vec(), vec![
-            (b"c".to_vec(), b"d".to_vec())]);
+        assert_eq!(table.to_vec(), vec![Some((b"c".to_vec(), b"d".to_vec()))]);
     }
 
     /// Tests that setting the maximum table size to 0 clears the dynamic
@@ -525,9 +569,9 @@ mod tests {
     #[test]
     fn test_dynamic_table_clear() {
         let mut table = DynamicTable::new();
-        table.add_header(b"a".to_vec(), b"b".to_vec());
-        table.add_header(b"123".to_vec(), b"456".to_vec());
-        table.add_header(b"c".to_vec(), b"d".to_vec());
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
+        table.add_header(Some((b"123".to_vec(), b"456".to_vec())));
+        table.add_header(Some((b"c".to_vec(), b"d".to_vec())));
         assert_eq!(3 * 32 + 2 + 6 + 2, table.get_size());
 
         table.set_max_table_size(0);
@@ -542,9 +586,9 @@ mod tests {
     /// can be added to the table.
     #[test]
     fn test_dynamic_table_max_size_zero() {
-        let mut table = DynamicTable::with_size(0);
+        let mut table = DynamicTable::with_size(0, |_| true);
 
-        table.add_header(b"a".to_vec(), b"b".to_vec());
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
 
         assert_eq!(0, table.len());
         assert_eq!(0, table.to_vec().len());
@@ -557,17 +601,13 @@ mod tests {
     #[test]
     fn test_dynamic_table_iter_with_elems() {
         let mut table = DynamicTable::new();
-        table.add_header(b"a".to_vec(), b"b".to_vec());
-        table.add_header(b"123".to_vec(), b"456".to_vec());
-        table.add_header(b"c".to_vec(), b"d".to_vec());
+        table.add_header(Some((b"a".to_vec(), b"b".to_vec())));
+        table.add_header(Some((b"123".to_vec(), b"456".to_vec())));
+        table.add_header(Some((b"c".to_vec(), b"d".to_vec())));
 
         let iter_res: Vec<(&[u8], &[u8])> = table.iter().collect();
 
-        let expected: Vec<(&[u8], &[u8])> = vec![
-            (b"c", b"d"),
-            (b"123", b"456"),
-            (b"a", b"b"),
-        ];
+        let expected: Vec<(&[u8], &[u8])> = vec![(b"c", b"d"), (b"123", b"456"), (b"a", b"b")];
         assert_eq!(iter_res, expected);
     }
 
@@ -590,7 +630,7 @@ mod tests {
         let table = HeaderTable::with_static_table(STATIC_TABLE);
 
         for (index, entry) in STATIC_TABLE.iter().enumerate() {
-            assert_eq!(table.get_from_table(index + 1).unwrap(), *entry);
+            assert_eq!(table.get_from_table(index + 1).unwrap(), Some(*entry));
         }
     }
 
@@ -600,8 +640,8 @@ mod tests {
     fn test_header_table_index_out_of_bounds() {
         let table = HeaderTable::with_static_table(STATIC_TABLE);
 
-        assert!(table.get_from_table(0).is_none());
-        assert!(table.get_from_table(STATIC_TABLE.len() + 1).is_none());
+        assert!(table.get_from_table(0).is_err());
+        assert!(table.get_from_table(STATIC_TABLE.len() + 1).is_err());
     }
 
     /// Tests that adding entries to the dynamic table through the
@@ -611,9 +651,12 @@ mod tests {
         let mut table = HeaderTable::with_static_table(STATIC_TABLE);
         let header = (b"a".to_vec(), b"b".to_vec());
 
-        table.add_header(header.0.clone(), header.1.clone());
+        table.add_header(Some((header.0.clone(), header.1.clone())));
 
-        assert_eq!(table.dynamic_table.to_vec(), vec![header]);
+        assert_eq!(
+            table.dynamic_table.to_vec(),
+            vec![Some((header.0, header.1))]
+        );
     }
 
     /// Tests that indexing the header table with indices that correspond to
@@ -623,10 +666,12 @@ mod tests {
         let mut table = HeaderTable::with_static_table(STATIC_TABLE);
         let header = (b"a".to_vec(), b"b".to_vec());
 
-        table.add_header(header.0.clone(), header.1.clone());
+        table.add_header(Some((header.0.clone(), header.1.clone())));
 
-        assert_eq!(table.get_from_table(STATIC_TABLE.len() + 1).unwrap(),
-                   ((&header.0[..], &header.1[..])));
+        assert_eq!(
+            table.get_from_table(STATIC_TABLE.len() + 1).unwrap(),
+            Some((&header.0[..], &header.1[..]))
+        );
     }
 
     /// Tests that the `iter` method of the `HeaderTable` returns an iterator
@@ -635,12 +680,9 @@ mod tests {
     #[test]
     fn test_header_table_iter() {
         let mut table = HeaderTable::with_static_table(STATIC_TABLE);
-        let headers: [(&[u8], &[u8]); 2] = [
-            (b"a", b"b"),
-            (b"c", b"d"),
-        ];
+        let headers: [(&[u8], &[u8]); 2] = [(b"a", b"b"), (b"c", b"d")];
         for header in headers.iter() {
-            table.add_header(header.0.to_vec(), header.1.to_vec());
+            table.add_header(Some((header.0.to_vec(), header.1.to_vec())));
         }
 
         let iterated: Vec<(&[u8], &[u8])> = table.iter().collect();
@@ -652,8 +694,11 @@ mod tests {
         }
         // Part of the dynamic table correctly iterated through: the elements
         // are in reversed order of insertion in the dynamic table.
-        for (h1, h2) in iterated.iter().skip(STATIC_TABLE.len())
-                                .zip(headers.iter().rev()) {
+        for (h1, h2) in iterated
+            .iter()
+            .skip(STATIC_TABLE.len())
+            .zip(headers.iter().rev())
+        {
             assert_eq!(h1, h2);
         }
     }
@@ -665,8 +710,7 @@ mod tests {
         let table = HeaderTable::with_static_table(STATIC_TABLE);
 
         for (i, h) in STATIC_TABLE.iter().enumerate() {
-            assert_eq!(table.find_header(*h).unwrap(),
-                       (i + 1, true));
+            assert_eq!(table.find_header(*h).unwrap(), (i + 1, true));
         }
     }
 
@@ -720,14 +764,13 @@ mod tests {
         }
     }
 
-
     /// Tests that searching for an entry in the header table, which should be
     /// fully in the dynamic table (both name and value), works correctly.
     #[test]
     fn test_find_header_dynamic_full() {
         let mut table = HeaderTable::with_static_table(STATIC_TABLE);
         let h: (&[u8], &[u8]) = (b":method", b"PUT");
-        table.add_header(h.0.to_vec(), h.1.to_vec());
+        table.add_header(Some((h.0.to_vec(), h.1.to_vec())));
 
         if let (index, true) = table.find_header(h).unwrap() {
             assert_eq!(index, STATIC_TABLE.len() + 1);
@@ -744,7 +787,7 @@ mod tests {
         // First add it to the dynamic table
         {
             let h = (b"X-Custom-Header", b"stuff");
-            table.add_header(h.0.to_vec(), h.1.to_vec());
+            table.add_header(Some((h.0.to_vec(), h.1.to_vec())));
         }
         // Prepare a search
         let h: (&[u8], &[u8]) = (b"X-Custom-Header", b"different-stuff");
