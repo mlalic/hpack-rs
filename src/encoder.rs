@@ -47,8 +47,8 @@
 use std::io;
 use std::num::Wrapping;
 
-use super::STATIC_TABLE;
 use super::HeaderTable;
+use super::STATIC_TABLE;
 
 /// Encode an integer to the representation defined by HPACK, writing it into the provider
 /// `io::Write` instance. Also allows the caller to specify the leading bits of the first
@@ -90,11 +90,11 @@ use super::HeaderTable;
 /// }
 /// ```
 pub fn encode_integer_into<W: io::Write>(
-        mut value: usize,
-        prefix_size: u8,
-        leading_bits: u8,
-        writer: &mut W)
-        -> io::Result<()> {
+    mut value: usize,
+    prefix_size: u8,
+    leading_bits: u8,
+    writer: &mut W,
+) -> io::Result<()> {
     let Wrapping(mask) = if prefix_size >= 8 {
         Wrapping(0xFF)
     } else {
@@ -105,17 +105,17 @@ pub fn encode_integer_into<W: io::Write>(
     let leading_bits = leading_bits & (!mask);
     let mask = mask as usize;
     if value < mask {
-        try!(writer.write_all(&[leading_bits | value as u8]));
+        writer.write_all(&[leading_bits | value as u8])?;
         return Ok(());
     }
 
-    try!(writer.write_all(&[leading_bits | mask as u8]));
+    writer.write_all(&[leading_bits | mask as u8])?;
     value -= mask;
     while value >= 128 {
-        try!(writer.write_all(&[((value % 128) + 128) as u8]));
+        writer.write_all(&[((value % 128) + 128) as u8])?;
         value = value / 128;
     }
-    try!(writer.write_all(&[value as u8]));
+    writer.write_all(&[value as u8])?;
     Ok(())
 }
 
@@ -193,7 +193,9 @@ impl<'a> Encoder<'a> {
     /// values in the produced header table). Strings are always encoded as
     /// literals (Huffman encoding is not used).
     pub fn encode<'b, I>(&mut self, headers: I) -> Vec<u8>
-            where I: IntoIterator<Item=(&'b [u8], &'b [u8])> {
+    where
+        I: IntoIterator<Item = (&'b [u8], &'b [u8])>,
+    {
         let mut encoded: Vec<u8> = Vec::new();
         self.encode_into(headers, &mut encoded).unwrap();
         encoded
@@ -204,10 +206,12 @@ impl<'a> Encoder<'a> {
     /// encoder will not be rolled back, though, so care should be taken to ensure that the paired
     /// decoder also ends up seeing the same state updates or that their pairing is cancelled.
     pub fn encode_into<'b, I, W>(&mut self, headers: I, writer: &mut W) -> io::Result<()>
-            where I: IntoIterator<Item=(&'b [u8], &'b [u8])>,
-                  W: io::Write {
+    where
+        I: IntoIterator<Item = (&'b [u8], &'b [u8])>,
+        W: io::Write,
+    {
         for header in headers {
-            try!(self.encode_header_into(header, writer));
+            self.encode_header_into(header, writer)?;
         }
         Ok(())
     }
@@ -217,27 +221,28 @@ impl<'a> Encoder<'a> {
     /// Any errors are propagated, similarly to the `encode_into` method, and it is the callers
     /// responsiblity to make sure that the paired encoder sees them too.
     pub fn encode_header_into<W: io::Write>(
-            &mut self,
-            header: (&[u8], &[u8]),
-            writer: &mut W)
-            -> io::Result<()> {
+        &mut self,
+        header: (&[u8], &[u8]),
+        writer: &mut W,
+    ) -> io::Result<()> {
         match self.header_table.find_header(header) {
             None => {
                 // The name of the header is in no tables: need to encode
                 // it with both a literal name and value.
-                try!(self.encode_literal(&header, true, writer));
-                self.header_table.add_header(header.0.to_vec(), header.1.to_vec());
-            },
+                self.encode_literal(&header, true, writer)?;
+                self.header_table
+                    .add_header(header.0.to_vec(), header.1.to_vec());
+            }
             Some((index, false)) => {
                 // The name of the header is at the given index, but the
                 // value does not match the current one: need to encode
                 // only the value as a literal.
-                try!(self.encode_indexed_name((index, header.1), false, writer));
-            },
+                self.encode_indexed_name((index, header.1), false, writer)?;
+            }
             Some((index, true)) => {
                 // The full header was found in one of the tables, so we
                 // just encode the index.
-                try!(self.encode_indexed(index, writer));
+                self.encode_indexed(index, writer)?;
             }
         };
         Ok(())
@@ -255,20 +260,16 @@ impl<'a> Encoder<'a> {
     /// - `buf` - The buffer into which the result is placed
     ///
     fn encode_literal<W: io::Write>(
-            &mut self,
-            header: &(&[u8], &[u8]),
-            should_index: bool,
-            buf: &mut W)
-            -> io::Result<()> {
-        let mask = if should_index {
-            0x40
-        } else {
-            0x0
-        };
+        &mut self,
+        header: &(&[u8], &[u8]),
+        should_index: bool,
+        buf: &mut W,
+    ) -> io::Result<()> {
+        let mask = if should_index { 0x40 } else { 0x0 };
 
-        try!(buf.write_all(&[mask]));
-        try!(self.encode_string_literal(&header.0, buf));
-        try!(self.encode_string_literal(&header.1, buf));
+        buf.write_all(&[mask])?;
+        self.encode_string_literal(&header.0, buf)?;
+        self.encode_string_literal(&header.1, buf)?;
         Ok(())
     }
 
@@ -279,32 +280,28 @@ impl<'a> Encoder<'a> {
     /// produces a string literal representations, according to the HPACK spec
     /// section 5.2.
     fn encode_string_literal<W: io::Write>(
-            &mut self,
-            octet_str: &[u8],
-            buf: &mut W)
-            -> io::Result<()> {
-        try!(encode_integer_into(octet_str.len(), 7, 0, buf));
-        try!(buf.write_all(octet_str));
+        &mut self,
+        octet_str: &[u8],
+        buf: &mut W,
+    ) -> io::Result<()> {
+        encode_integer_into(octet_str.len(), 7, 0, buf)?;
+        buf.write_all(octet_str)?;
         Ok(())
     }
 
     /// Encodes a header whose name is indexed and places the result in the
     /// given buffer `buf`.
     fn encode_indexed_name<W: io::Write>(
-            &mut self,
-            header: (usize, &[u8]),
-            should_index: bool,
-            buf: &mut W)
-            -> io::Result<()> {
-        let (mask, prefix) = if should_index {
-            (0x40, 6)
-        } else {
-            (0x0, 4)
-        };
+        &mut self,
+        header: (usize, &[u8]),
+        should_index: bool,
+        buf: &mut W,
+    ) -> io::Result<()> {
+        let (mask, prefix) = if should_index { (0x40, 6) } else { (0x0, 4) };
 
-        try!(encode_integer_into(header.0, prefix, mask, buf));
+        encode_integer_into(header.0, prefix, mask, buf)?;
         // So far, we rely on just one strategy for encoding string literals.
-        try!(self.encode_string_literal(&header.1, buf));
+        self.encode_string_literal(&header.1, buf)?;
         Ok(())
     }
 
@@ -315,7 +312,7 @@ impl<'a> Encoder<'a> {
     fn encode_indexed<W: io::Write>(&self, index: usize, buf: &mut W) -> io::Result<()> {
         // We need to set the most significant bit, since the bit-pattern is
         // `1xxxxxxx` for indexed headers.
-        try!(encode_integer_into(index, 7, 0x80, buf));
+        encode_integer_into(index, 7, 0x80, buf)?;
         Ok(())
     }
 }
@@ -359,9 +356,7 @@ mod tests {
     #[test]
     fn test_encode_only_method() {
         let mut encoder: Encoder = Encoder::new();
-        let headers = vec![
-            (b":method".to_vec(), b"GET".to_vec()),
-        ];
+        let headers = vec![(b":method".to_vec(), b"GET".to_vec())];
 
         let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
@@ -374,9 +369,7 @@ mod tests {
     #[test]
     fn test_custom_header_gets_indexed() {
         let mut encoder: Encoder = Encoder::new();
-        let headers = vec![
-            (b"custom-key".to_vec(), b"custom-value".to_vec()),
-        ];
+        let headers = vec![(b"custom-key".to_vec(), b"custom-value".to_vec())];
 
         let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
         assert!(is_decodable(&result, &headers));
@@ -393,9 +386,7 @@ mod tests {
     #[test]
     fn test_uses_index_on_second_iteration() {
         let mut encoder: Encoder = Encoder::new();
-        let headers = vec![
-            (b"custom-key".to_vec(), b"custom-value".to_vec()),
-        ];
+        let headers = vec![(b"custom-key".to_vec(), b"custom-value".to_vec())];
         // First encoding...
         let _ = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
@@ -415,7 +406,8 @@ mod tests {
         // The header table actually contains the header at that index?
         assert_eq!(
             encoder.header_table.get_from_table(62).unwrap(),
-            (&headers[0].0[..], &headers[0].1[..]));
+            (&headers[0].0[..], &headers[0].1[..])
+        );
     }
 
     /// Tests that when a header name is indexed, but the value isn't, the
@@ -426,9 +418,7 @@ mod tests {
         {
             let mut encoder: Encoder = Encoder::new();
             // `:method` is in the static table, but only for GET and POST
-            let headers = vec![
-                (b":method", b"PUT"),
-            ];
+            let headers = vec![(b":method", b"PUT")];
 
             let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
@@ -441,9 +431,7 @@ mod tests {
         {
             let mut encoder: Encoder = Encoder::new();
             // `:method` is in the static table, but only for GET and POST
-            let headers = vec![
-                (b":authority".to_vec(), b"example.com".to_vec()),
-            ];
+            let headers = vec![(b":authority".to_vec(), b"example.com".to_vec())];
 
             let result = encoder.encode(headers.iter().map(|h| (&h.0[..], &h.1[..])));
 
@@ -451,7 +439,8 @@ mod tests {
             // The rest of it correctly represents PUT?
             assert_eq!(
                 &result[1..],
-                &[11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm'])
+                &[11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm']
+            )
         }
     }
 
